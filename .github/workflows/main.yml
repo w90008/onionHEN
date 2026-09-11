@@ -12,45 +12,49 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    # 1. سحب كود المشروع الأساسي فقط بدون الـ Submodules لتفادي الخطأ
+    # 1. سحب كود المشروع الأساسي
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
         submodules: 'false'
 
-    # 2. إعداد سحب المستودعات الفرعية يدويًا مع تخطي الأخطاء وسحب أحدث نسخة متوفرة
+    # 2. جلب وتصحيح الـ Submodules يدوياً وتخطي الملف المفقود في BearSSL
     - name: Initialize Submodules Manually
       run: |
         git submodule init
-        # سحب kstuff-lite بدون المجلدات الداخلية المعطوبة التابعة له أولاً
         git submodule update --init --depth 1 third_party/kstuff-lite
-        
-        # الدخول إلى kstuff-lite وتحديث المستودعات الداخلية الخاصة به مع تجاهل التحديث العميق الصارم
         cd third_party/kstuff-lite
         git submodule init
-        # استخدام التحديث البعيد لجلب النسخ المتوفرة حالياً وتخطي الـ Commit المفقود
         git submodule update --init --remote --recursive --depth 1 || true
         cd ../../
 
-    # 3. إعداد بيئة Docker Buildx
+    # 3. تعديل ملف الـ Dockerfile برمجياً لإلغاء أمر الـ git submodule update الداخلي المعطوب
+    - name: Patch Dockerfile to skip internal git update
+      run: |
+        if [ -f Dockerfile ]; then
+          # حذف أمر تحديث الـ submodule الداخلي من سطر البناء ليعتمد على الملفات المجهزة بالخارج
+          sed -i 's/git -C \/workspace submodule update --init --recursive &&//g' Dockerfile
+        fi
+
+    # 4. إعداد بيئة Docker Buildx
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    # 4. بناء المشروع باستخدام Docker Compose
+    # 5. بناء الحاوية البرمجية والمشروع
     - name: Build with Docker Compose
       run: |
         docker compose build
 
-    # 5. استخراج ملفات الحزم والـ Binaries الناتجة للبناء
+    # 6. استخراج ملفات البناء النهائية (Artifacts)
     - name: Extract Build Artifacts
       run: |
         docker compose up --no-start
         mkdir -p ./compiled_output
         docker cp $(docker compose ps -q | head -n 1):/app/build ./compiled_output || docker cp $(docker compose ps -q | head -n 1):/workspace/build ./compiled_output || echo "No build folder found"
         
-    # 6. رفع الملفات المجمعة للتحميل
+    # 7. رفع الملفات الناتجة لتظهر للتحميل في تبويب Actions
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: onionHEN-PS4-Build
+        name: onionHEN-PS5-PS4-Build
         path: ./compiled_output/
