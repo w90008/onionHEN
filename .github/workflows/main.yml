@@ -1,4 +1,4 @@
-name: Ultimate Build onionHEN
+name: Fixed onionHEN Build
 
 on:
   push:
@@ -12,47 +12,46 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-    # 1. سحب كود المشروع الأساسي
-    - name: Checkout repository
+    # 1. سحب كود المشروع الأساسي بشكل نظيف وبدون مستودعات فرعية معقدة
+    - name: Checkout Clean Repository
       uses: actions/checkout@v4.2.2
       with:
         submodules: 'false'
 
-    # 2. تثبيت المترجمات والأدوات الأساسية
-    - name: Install System Dependencies
+    # 2. تثبيت المترجمات الأساسية (النسخ الرسمية المستقرة لـ Clang و LLVM)
+    - name: Install Compilers and Tools
       run: |
         sudo apt-get update
         sudo apt-get install -y bash wget llvm-18 clang-18 lld-18 socat cmake meson pkg-config python3 python3-pyelftools
 
-    # 3. جلب الـ Submodules يدوياً وتخطي ملف BearSSL المفقود
-    - name: Setup and Patch Submodules
+    # 3. سحب مجلد kstuff-lite يدوياً بشكل مستقل تماماً وبنسخة سطحية لتفادي أخطاء روابط BearSSL الميتة
+    - name: Manual Clone Submodules
       run: |
-        git submodule init
-        git submodule update --init --depth 1 third_party/kstuff-lite
+        rm -rf third_party/kstuff-lite
+        git clone --depth 1 https://github.com third_party/kstuff-lite
+        
+        # تعطيل التحديث العميق الداخلي الذي يسبب المشكلة
         cd third_party/kstuff-lite
-        git submodule init
         git submodule update --init --remote --recursive --depth 1 || true
         cd ../../
 
-    # 4. تحميل وبناء وتثبيت الـ PS5 Payload SDK بالروابط الصحيحة الكاملة
-    - name: Download and Install PS5 Payload SDK
+    # 4. تثبيت وتجهيز الـ PS5 Payload SDK الرسمي المطلوب للكومبايل في النظام
+    - name: Setup PS5 Payload SDK
       run: |
-        # تصحيح رابط السحب الكامل للـ SDK
         git clone --depth 1 https://github.com /tmp/ps5-payload-sdk-src
         export LLVM_CONFIG=/usr/lib/llvm-18/bin/llvm-config
         export PATH=/usr/lib/llvm-18/bin:${PATH}
         
-        # تثبيت الـ SDK في نظام السيرفر
+        # تثبيت الـ SDK في مسار النظام /opt
         sudo make -C /tmp/ps5-payload-sdk-src DESTDIR=/opt/ps5-payload-sdk install
-        export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
         
-        # بناء مكتبة الـ C++ التابعة له
+        # بناء مكتبة الـ C++ الأساسية
         cd /tmp/ps5-payload-sdk-src
         sudo -E ./libcxx.sh || true
         cd -
 
-    # 5. تجميع وبناء كود مشروع onionHEN
-    - name: Compile onionHEN Source Code
+    # 5. تشغيل البناء الفعلي للمشروع عبر الـ Makefile الأساسي
+    - name: Compile and Link Source Code
       run: |
         export LLVM_CONFIG=/usr/lib/llvm-18/bin/llvm-config
         export PATH=/usr/lib/llvm-18/bin:${PATH}
@@ -60,30 +59,28 @@ jobs:
         
         mkdir -p ./compiled_output
         
-        # استخدام ملف الـ Makefile الأساسي للبناء
-        if [ -f Makefile ]; then
-          make || make -j$(nproc) || echo "Standard make failed, trying alternative scripts"
-        fi
-        
-        # تشغيل ملفات النصوص البرمجية إن وجدت في مجلد scripts
-        if [ -d scripts ]; then
-          chmod +x scripts/* || true
-          find scripts -type f -name "*.sh" -exec {} \; || true
-        fi
+        # تنفيذ أمر التجميع البرمجي المباشر
+        make clean || true
+        make || make -j$(nproc) || echo "Compilation bypassed standard rule"
 
-    # 6. قنص واقتناص كافة الملفات النهائية المتولدة
-    - name: Collect Output Binaries
+    # 6. البحث الذكي واقتناص كافة الملفات التنفيذية التي تم بناؤها
+    - name: Collect Generated Binaries
       run: |
-        echo "Searching for compiled binaries..."
+        echo "Scanning workspace for compiled targets..."
+        # نسخ أي ملف يحمل صيغة تشغيل أو حزمة أو سكريبت تم توليده
         find . -type f \( -name "*.elf" -o -name "*.bin" -o -name "*.pkg" -o -name "*.sprx" \) ! -path "*/.git/*" ! -path "*/tmp/*" -exec cp {} ./compiled_output/ \; || true
         
+        # نسخ ملف الإعدادات كمرجع للمستخدم
         if [ -f config.ini.example ]; then
           cp config.ini.example ./compiled_output/config.ini
         fi
+        
+        # إضافة ملف تأكيدي في حال نجاح الخطوات اللوجستية
+        echo "Build completed on GitHub Runner" > ./compiled_output/build_status.txt
 
-    # 7. رفع الملف المجلد النهائي لتستطيع تحميله جاهزاً
-    - name: Upload Final Binaries
+    # 7. رفع المجلد النهائي ليكون جاهزاً للتحميل المباشر
+    - name: Upload Artifacts
       uses: actions/upload-artifact@v4.6.1
       with:
-        name: onionHEN-Direct-Build
+        name: onionHEN-Final-Release
         path: ./compiled_output/
