@@ -18,7 +18,7 @@ jobs:
       with:
         submodules: 'false'
 
-    # 2. جلب وتصحيح الـ Submodules يدوياً
+    # 2. جلب وتصحيح الـ Submodules يدوياً لتفادي مشكلة BearSSL
     - name: Initialize Submodules Manually
       run: |
         git submodule init
@@ -44,34 +44,34 @@ jobs:
       run: |
         docker compose build
 
-    # 6. البحث الذكي واستخراج كافة ملفات البناء النهائية من داخل الحاوية
-    - name: Smart Extract Build Artifacts
+    # 6. استخراج الملفات بدون تشغيل الحاوية لتفادي أخطاء التوقف الصارم
+    - name: Safe Extract Build Artifacts
       run: |
-        # تشغيل الحاوية في الخلفية بشكل مؤقت لقراءة محتواها
-        docker compose up --no-start
-        CONTAINER_ID=$(docker compose ps -q | head -n 1)
-        
+        # إنشاء المجلد المحلي لاستقبال المخرجات
         mkdir -p ./compiled_output
-        echo "Searching for built artifacts inside container..."
         
-        # البحث عن المجلدات الشائعة للمخرجات ونسخ محتواها إن وجدت
-        docker cp $CONTAINER_ID:/workspace/out/. ./compiled_output/ 2>/dev/null || true
-        docker cp $CONTAINER_ID:/workspace/build/. ./compiled_output/ 2>/dev/null || true
-        docker cp $CONTAINER_ID:/app/build/. ./compiled_output/ 2>/dev/null || true
-        docker cp $CONTAINER_ID:/app/out/. ./compiled_output/ 2>/dev/null || true
+        # إنشاء حاوية مؤقتة ثابتة من صورة البناء التي تم إنتاجها بواسطة الـ Compose
+        # نستخدم اسم الصورة الافتراضي للمشروع الموضح بالسجلات
+        docker create --name temp_extractor onionhen-onionhen-build-1 || docker create --name temp_extractor onionhen-build || docker create --name temp_extractor $(docker images --format "{{.Repository}}:{{.Tag}}" | head -n 1)
         
-        # بحث شامل عن أي ملفات تنفيذية ناتجة (مثل .elf أو .pkg) تم إنشاؤها وتجميعها في الحاوية ونسخها
-        docker exec $CONTAINER_ID find /workspace /app -type f \( -name "*.elf" -o -name "*.pkg" -o -name "*.bin" -o -name "*.sprx" \) -exec docker cp $CONTAINER_ID:{} ./compiled_output/ \; 2>/dev/null || true
+        echo "Extracting final payloads from secure build environments..."
         
-        # التأكد من وجود ملفات، إذا كان المجلد لا يزال فارغاً، انسخ كامل مجلد العمل لمعاينته
-        if [ -z "$(ls -A ./compiled_output)" ]; then
-          echo "No targeted files found, copying entire workspace for debug."
-          docker cp $CONTAINER_ID:/workspace/. ./compiled_output/ 2>/dev/null || docker cp $CONTAINER_ID:/app/. ./compiled_output/ 2>/dev/null
-        fi
+        # نسخ المجلدات والمخرجات المحتملة مباشرة بشكل أوفلاين
+        docker cp temp_extractor:/workspace/out/. ./compiled_output/ 2>/dev/null || true
+        docker cp temp_extractor:/workspace/build/. ./compiled_output/ 2>/dev/null || true
+        docker cp temp_extractor:/app/build/. ./compiled_output/ 2>/dev/null || true
+        docker cp temp_extractor:/app/out/. ./compiled_output/ 2>/dev/null || true
+        
+        # إذا تم تجميع الملف في مسار الجذر داخل الحاوية
+        docker cp temp_extractor:/workspace/OnionHEN.elf ./compiled_output/ 2>/dev/null || true
+        docker cp temp_extractor:/app/OnionHEN.elf ./compiled_output/ 2>/dev/null || true
+        
+        # تنظيف بيئة العمل وحذف الحاوية المؤقتة
+        docker rm temp_extractor
 
-    # 7. رفع الملفات المجمعة والناتجة للتحميل
+    # 7. رفع الملفات المجمعة بنجاح للتحميل والتشغيل
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4.6.1
       with:
-        name: onionHEN-Final-Artifacts
+        name: onionHEN-Final-Release
         path: ./compiled_output/
