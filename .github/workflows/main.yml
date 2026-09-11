@@ -1,0 +1,43 @@
+name: Build and Package Project
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch: # يتيح لك تشغيل البناء يدوياً بضغطة زر
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1. سحب كود المشروع من المستودع
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive # لتفعيل المجلدات الفرعية مثل third_party إن وجدت
+
+    # 2. إعداد بيئة Docker للبناء
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    # 3. بناء المشروع باستخدام Dockerfile الموجود بالمشروع
+    - name: Build Docker Image
+      run: |
+        docker build -t ps4-project-build .
+
+    # 4. تشغيل الحاوية واستخراج الملفات المجمعة (الـ Binaries أو الحزم الناتجة)
+    # ملاحظة: قم بتعديل مسار المجلد الناتجة (مثلاً out أو build) بناءً على مشروعك
+    - name: Extract Build Artifacts
+      run: |
+        docker create --name exporter ps4-project-build
+        docker cp exporter:/app/build ./compiled_output || docker cp exporter:/workspace/build ./compiled_output || mkdir ./compiled_output
+        docker rm exporter
+
+    # 5. رفع الملفات الناتجة لتظهر لك في تبويب Actions للتحميل
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: PS4-Project-Build
+        path: ./compiled_output/
