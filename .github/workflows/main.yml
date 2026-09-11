@@ -14,11 +14,11 @@ jobs:
     steps:
     # 1. سحب كود المشروع الأساسي
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v4.2.2
       with:
         submodules: 'false'
 
-    # 2. جلب وتصحيح الـ Submodules يدوياً وتخطي الملف المفقود في BearSSL
+    # 2. جلب وتصحيح الـ Submodules يدوياً
     - name: Initialize Submodules Manually
       run: |
         git submodule init
@@ -32,29 +32,46 @@ jobs:
     - name: Patch Dockerfile to skip internal git update
       run: |
         if [ -f Dockerfile ]; then
-          # حذف أمر تحديث الـ submodule الداخلي من سطر البناء ليعتمد على الملفات المجهزة بالخارج
           sed -i 's/git -C \/workspace submodule update --init --recursive &&//g' Dockerfile
         fi
 
     # 4. إعداد بيئة Docker Buildx
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@v3.10.0
 
     # 5. بناء الحاوية البرمجية والمشروع
     - name: Build with Docker Compose
       run: |
         docker compose build
 
-    # 6. استخراج ملفات البناء النهائية (Artifacts)
-    - name: Extract Build Artifacts
+    # 6. البحث الذكي واستخراج كافة ملفات البناء النهائية من داخل الحاوية
+    - name: Smart Extract Build Artifacts
       run: |
+        # تشغيل الحاوية في الخلفية بشكل مؤقت لقراءة محتواها
         docker compose up --no-start
-        mkdir -p ./compiled_output
-        docker cp $(docker compose ps -q | head -n 1):/app/build ./compiled_output || docker cp $(docker compose ps -q | head -n 1):/workspace/build ./compiled_output || echo "No build folder found"
+        CONTAINER_ID=$(docker compose ps -q | head -n 1)
         
-    # 7. رفع الملفات الناتجة لتظهر للتحميل في تبويب Actions
+        mkdir -p ./compiled_output
+        echo "Searching for built artifacts inside container..."
+        
+        # البحث عن المجلدات الشائعة للمخرجات ونسخ محتواها إن وجدت
+        docker cp $CONTAINER_ID:/workspace/out/. ./compiled_output/ 2>/dev/null || true
+        docker cp $CONTAINER_ID:/workspace/build/. ./compiled_output/ 2>/dev/null || true
+        docker cp $CONTAINER_ID:/app/build/. ./compiled_output/ 2>/dev/null || true
+        docker cp $CONTAINER_ID:/app/out/. ./compiled_output/ 2>/dev/null || true
+        
+        # بحث شامل عن أي ملفات تنفيذية ناتجة (مثل .elf أو .pkg) تم إنشاؤها وتجميعها في الحاوية ونسخها
+        docker exec $CONTAINER_ID find /workspace /app -type f \( -name "*.elf" -o -name "*.pkg" -o -name "*.bin" -o -name "*.sprx" \) -exec docker cp $CONTAINER_ID:{} ./compiled_output/ \; 2>/dev/null || true
+        
+        # التأكد من وجود ملفات، إذا كان المجلد لا يزال فارغاً، انسخ كامل مجلد العمل لمعاينته
+        if [ -z "$(ls -A ./compiled_output)" ]; then
+          echo "No targeted files found, copying entire workspace for debug."
+          docker cp $CONTAINER_ID:/workspace/. ./compiled_output/ 2>/dev/null || docker cp $CONTAINER_ID:/app/. ./compiled_output/ 2>/dev/null
+        fi
+
+    # 7. رفع الملفات المجمعة والناتجة للتحميل
     - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v4.6.1
       with:
-        name: onionHEN-PS5-PS4-Build
+        name: onionHEN-Final-Artifacts
         path: ./compiled_output/
