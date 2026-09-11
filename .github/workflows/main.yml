@@ -9,82 +9,79 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04 # استخدام نسخة محددة ومستقرة من النظام
+    runs-on: ubuntu-24.04
 
     steps:
-    # 1. سحب كود المشروع الأساسي بدون الـ submodules المعطوبة
+    # 1. سحب كود المشروع الأساسي
     - name: Checkout repository
       uses: actions/checkout@v4.2.2
       with:
         submodules: 'false'
 
-    # 2. تثبيت الحزم والمترجمات المطلوبة لبناء مشاريع الـ PS4/PS5 SDK (Clang 18)
+    # 2. تثبيت المترجمات والأدوات الأساسية
     - name: Install System Dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y bash wget llvm-18 clang-18 lld-18 socat cmake meson pkg-config python3 python3-pyelftools
 
-    # 3. جلب الـ Submodules يدوياً وتصحيح مكتبة BearSSL التالفة
+    # 3. جلب الـ Submodules يدوياً وتخطي ملف BearSSL المفقود
     - name: Setup and Patch Submodules
       run: |
         git submodule init
         git submodule update --init --depth 1 third_party/kstuff-lite
         cd third_party/kstuff-lite
         git submodule init
-        # جلب المستودعات الفرعية مع تخطي الروابط الميتة لـ BearSSL
         git submodule update --init --remote --recursive --depth 1 || true
         cd ../../
 
-    # 4. تحميل، بناء، وتثبيت الـ PS5 Payload SDK الرسمي المطلوب للكومبايل
+    # 4. تحميل وبناء وتثبيت الـ PS5 Payload SDK بالروابط الصحيحة الكاملة
     - name: Download and Install PS5 Payload SDK
       run: |
+        # تصحيح رابط السحب الكامل للـ SDK
         git clone --depth 1 https://github.com /tmp/ps5-payload-sdk-src
         export LLVM_CONFIG=/usr/lib/llvm-18/bin/llvm-config
         export PATH=/usr/lib/llvm-18/bin:${PATH}
         
-        # بناء الـ SDK وتثبيته في المسار الافتراضي للمشروع
+        # تثبيت الـ SDK في نظام السيرفر
         sudo make -C /tmp/ps5-payload-sdk-src DESTDIR=/opt/ps5-payload-sdk install
         export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
         
-        # بناء مكتبة الـ C++ الخاصة بالـ SDK
+        # بناء مكتبة الـ C++ التابعة له
         cd /tmp/ps5-payload-sdk-src
         sudo -E ./libcxx.sh || true
         cd -
 
-    # 5. عملية البناء والتجميع الفعلي لملفات onionHEN (الـ Compile)
+    # 5. تجميع وبناء كود مشروع onionHEN
     - name: Compile onionHEN Source Code
       run: |
         export LLVM_CONFIG=/usr/lib/llvm-18/bin/llvm-config
         export PATH=/usr/lib/llvm-18/bin:${PATH}
         export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
         
-        # إنشاء مجلد المخرجات
         mkdir -p ./compiled_output
         
-        # تشغيل أمر البناء البرمجي الأساسي للمشروع (Makefile)
+        # استخدام ملف الـ Makefile الأساسي للبناء
         if [ -f Makefile ]; then
           make || make -j$(nproc) || echo "Standard make failed, trying alternative scripts"
         fi
         
-        # تشغيل السكريبتات المساعدة في مجلد scripts إن وجدت
+        # تشغيل ملفات النصوص البرمجية إن وجدت في مجلد scripts
         if [ -d scripts ]; then
           chmod +x scripts/* || true
           find scripts -type f -name "*.sh" -exec {} \; || true
         fi
 
-    # 6. جمع كافة الملفات التنفيذية الناتجة (.elf, .bin, .pkg, .sprx)
+    # 6. قنص واقتناص كافة الملفات النهائية المتولدة
     - name: Collect Output Binaries
       run: |
         echo "Searching for compiled binaries..."
-        # نسخ أي ملف ناتج تم تجميعه بنجاح إلى مجلد الرفع
-        find . -type f \( -name "*.elf" -o -name "*.bin" -o -name "*.pkg" -o -name "*.sprx" \) ! -path "*/.git/*" ! -path "*//tmp/*" -exec cp {} ./compiled_output/ \; || true
+        find . -type f \( -name "*.elf" -o -name "*.bin" -o -name "*.pkg" -o -name "*.sprx" \) ! -path "*/.git/*" ! -path "*/tmp/*" -exec cp {} ./compiled_output/ \; || true
         
-        # سحب ملف الإعدادات كمثال للمستخدم
         if [ -f config.ini.example ]; then
           cp config.ini.example ./compiled_output/config.ini
         fi
 
-    # 7. رفع الملفات النهائية المجمعة للتحميل المباشر
+    # 7. رفع الملف المجلد النهائي لتستطيع تحميله جاهزاً
     - name: Upload Final Binaries
       uses: actions/upload-artifact@v4.6.1
       with:
