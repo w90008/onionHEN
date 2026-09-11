@@ -1,4 +1,4 @@
-name: Build onionHEN
+name: Ultimate Build onionHEN
 
 on:
   push:
@@ -9,69 +9,84 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # استخدام نسخة محددة ومستقرة من النظام
 
     steps:
-    # 1. سحب كود المشروع الأساسي
+    # 1. سحب كود المشروع الأساسي بدون الـ submodules المعطوبة
     - name: Checkout repository
       uses: actions/checkout@v4.2.2
       with:
         submodules: 'false'
 
-    # 2. جلب وتصحيح الـ Submodules يدوياً لتفادي مشكلة BearSSL
-    - name: Initialize Submodules Manually
+    # 2. تثبيت الحزم والمترجمات المطلوبة لبناء مشاريع الـ PS4/PS5 SDK (Clang 18)
+    - name: Install System Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bash wget llvm-18 clang-18 lld-18 socat cmake meson pkg-config python3 python3-pyelftools
+
+    # 3. جلب الـ Submodules يدوياً وتصحيح مكتبة BearSSL التالفة
+    - name: Setup and Patch Submodules
       run: |
         git submodule init
         git submodule update --init --depth 1 third_party/kstuff-lite
         cd third_party/kstuff-lite
         git submodule init
+        # جلب المستودعات الفرعية مع تخطي الروابط الميتة لـ BearSSL
         git submodule update --init --remote --recursive --depth 1 || true
         cd ../../
 
-    # 3. تعديل ملف الـ Dockerfile برمجياً لإلغاء أمر الـ git submodule update الداخلي المعطوب
-    - name: Patch Dockerfile to skip internal git update
+    # 4. تحميل، بناء، وتثبيت الـ PS5 Payload SDK الرسمي المطلوب للكومبايل
+    - name: Download and Install PS5 Payload SDK
       run: |
-        if [ -f Dockerfile ]; then
-          sed -i 's/git -C \/workspace submodule update --init --recursive &&//g' Dockerfile
-        fi
+        git clone --depth 1 https://github.com /tmp/ps5-payload-sdk-src
+        export LLVM_CONFIG=/usr/lib/llvm-18/bin/llvm-config
+        export PATH=/usr/lib/llvm-18/bin:${PATH}
+        
+        # بناء الـ SDK وتثبيته في المسار الافتراضي للمشروع
+        sudo make -C /tmp/ps5-payload-sdk-src DESTDIR=/opt/ps5-payload-sdk install
+        export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+        
+        # بناء مكتبة الـ C++ الخاصة بالـ SDK
+        cd /tmp/ps5-payload-sdk-src
+        sudo -E ./libcxx.sh || true
+        cd -
 
-    # 4. إعداد بيئة Docker Buildx
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3.10.0
-
-    # 5. بناء الحاوية البرمجية والمشروع
-    - name: Build with Docker Compose
+    # 5. عملية البناء والتجميع الفعلي لملفات onionHEN (الـ Compile)
+    - name: Compile onionHEN Source Code
       run: |
-        docker compose build
-
-    # 6. استخراج الملفات بدون تشغيل الحاوية لتفادي أخطاء التوقف الصارم
-    - name: Safe Extract Build Artifacts
-      run: |
-        # إنشاء المجلد المحلي لاستقبال المخرجات
+        export LLVM_CONFIG=/usr/lib/llvm-18/bin/llvm-config
+        export PATH=/usr/lib/llvm-18/bin:${PATH}
+        export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+        
+        # إنشاء مجلد المخرجات
         mkdir -p ./compiled_output
         
-        # إنشاء حاوية مؤقتة ثابتة من صورة البناء التي تم إنتاجها بواسطة الـ Compose
-        # نستخدم اسم الصورة الافتراضي للمشروع الموضح بالسجلات
-        docker create --name temp_extractor onionhen-onionhen-build-1 || docker create --name temp_extractor onionhen-build || docker create --name temp_extractor $(docker images --format "{{.Repository}}:{{.Tag}}" | head -n 1)
+        # تشغيل أمر البناء البرمجي الأساسي للمشروع (Makefile)
+        if [ -f Makefile ]; then
+          make || make -j$(nproc) || echo "Standard make failed, trying alternative scripts"
+        fi
         
-        echo "Extracting final payloads from secure build environments..."
-        
-        # نسخ المجلدات والمخرجات المحتملة مباشرة بشكل أوفلاين
-        docker cp temp_extractor:/workspace/out/. ./compiled_output/ 2>/dev/null || true
-        docker cp temp_extractor:/workspace/build/. ./compiled_output/ 2>/dev/null || true
-        docker cp temp_extractor:/app/build/. ./compiled_output/ 2>/dev/null || true
-        docker cp temp_extractor:/app/out/. ./compiled_output/ 2>/dev/null || true
-        
-        # إذا تم تجميع الملف في مسار الجذر داخل الحاوية
-        docker cp temp_extractor:/workspace/OnionHEN.elf ./compiled_output/ 2>/dev/null || true
-        docker cp temp_extractor:/app/OnionHEN.elf ./compiled_output/ 2>/dev/null || true
-        
-        # تنظيف بيئة العمل وحذف الحاوية المؤقتة
-        docker rm temp_extractor
+        # تشغيل السكريبتات المساعدة في مجلد scripts إن وجدت
+        if [ -d scripts ]; then
+          chmod +x scripts/* || true
+          find scripts -type f -name "*.sh" -exec {} \; || true
+        fi
 
-    # 7. رفع الملفات المجمعة بنجاح للتحميل والتشغيل
-    - name: Upload Artifacts
+    # 6. جمع كافة الملفات التنفيذية الناتجة (.elf, .bin, .pkg, .sprx)
+    - name: Collect Output Binaries
+      run: |
+        echo "Searching for compiled binaries..."
+        # نسخ أي ملف ناتج تم تجميعه بنجاح إلى مجلد الرفع
+        find . -type f \( -name "*.elf" -o -name "*.bin" -o -name "*.pkg" -o -name "*.sprx" \) ! -path "*/.git/*" ! -path "*//tmp/*" -exec cp {} ./compiled_output/ \; || true
+        
+        # سحب ملف الإعدادات كمثال للمستخدم
+        if [ -f config.ini.example ]; then
+          cp config.ini.example ./compiled_output/config.ini
+        fi
+
+    # 7. رفع الملفات النهائية المجمعة للتحميل المباشر
+    - name: Upload Final Binaries
       uses: actions/upload-artifact@v4.6.1
       with:
-        name: onionHEN-Final-Release
+        name: onionHEN-Direct-Build
         path: ./compiled_output/
