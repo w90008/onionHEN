@@ -1,43 +1,47 @@
-name: Build and Package Project
+name: Build onionHEN
 
 on:
   push:
     branches: [ "main", "master" ]
   pull_request:
     branches: [ "main", "master" ]
-  workflow_dispatch: # يتيح لك تشغيل البناء يدوياً بضغطة زر
+  workflow_dispatch: # يتيح لك تشغيل البناء يدوياً من موقع جيتهاب
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-    # 1. سحب كود المشروع من المستودع
+    # 1. سحب كود المشروع والمجلدات الفرعية (Submodules) مثل kstuff-lite
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        submodules: recursive # لتفعيل المجلدات الفرعية مثل third_party إن وجدت
+        submodules: recursive
 
-    # 2. إعداد بيئة Docker للبناء
+    # 2. إعداد بيئة Docker Buildx المتطورة للبناء
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    # 3. بناء المشروع باستخدام Dockerfile الموجود بالمشروع
-    - name: Build Docker Image
+    # 3. بناء المشروع باستخدام Dockerfile وملف الـ Compose المرفقين في مشروعك
+    - name: Build with Docker Compose
       run: |
-        docker build -t ps4-project-build .
+        docker compose build
 
-    # 4. تشغيل الحاوية واستخراج الملفات المجمعة (الـ Binaries أو الحزم الناتجة)
-    # ملاحظة: قم بتعديل مسار المجلد الناتجة (مثلاً out أو build) بناءً على مشروعك
+    # 4. تشغيل الحاوية المؤقتة لاستخراج ملفات الحزم والـ Binaries الناتجة للبناء
     - name: Extract Build Artifacts
       run: |
-        docker create --name exporter ps4-project-build
-        docker cp exporter:/app/build ./compiled_output || docker cp exporter:/workspace/build ./compiled_output || mkdir ./compiled_output
-        docker rm exporter
-
-    # 5. رفع الملفات الناتجة لتظهر لك في تبويب Actions للتحميل
+        # نقوم بإنشاء الحاوية لاستخراج الملفات المجمعة منها قبل حذفها
+        docker compose up --no-start
+        
+        # استبدل كلمة 'app' باسم الخدمة المكتوبة داخل ملف docker-compose.yml لديك إذا اختلف الاسم
+        # سنقوم بنسخ المخرجات إلى مجلد محلي يسمى compiled_output
+        mkdir -p ./compiled_output
+        docker cp $(docker compose ps -q | head -n 1):/app/build ./compiled_output || docker cp $(docker compose ps -q | head -n 1):/workspace/build ./compiled_output || echo "No build folder found, uploading context"
+        
+    # 5. رفع الملفات المجمعة لتظهر لك في تبويب Actions للتحميل المباشر
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: PS4-Project-Build
+        name: onionHEN-PS4-Build
         path: ./compiled_output/
+
