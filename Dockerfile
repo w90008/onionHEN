@@ -45,6 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       m4 \
       gettext \
       perl \
+      file \
     && ln -sf /usr/lib/llvm-18/bin/llvm-config /usr/local/bin/llvm-config \
     && rm -rf /var/lib/apt/lists/*
 
@@ -63,85 +64,96 @@ RUN find /workspace -type f \
 
 # ============================================================
 # PS5 Payload SDK
-# ============================================================
-
-RUN git clone --depth 1 \
-      https://github.com/ps5-payload-dev/sdk.git \
-      /tmp/ps5-payload-sdk-src \
-    && export LLVM_CONFIG=/usr/lib/llvm-18/bin/llvm-config \
-    && export PATH=/usr/lib/llvm-18/bin:${PATH} \
-    && make -C /tmp/ps5-payload-sdk-src \
-         DESTDIR=/opt/ps5-payload-sdk \
-         install \
-    && cd /tmp/ps5-payload-sdk-src \
-    && export LLVM_CONFIG=/usr/lib/llvm-18/bin/llvm-config \
-    && ./libcxx.sh \
-    && cd /workspace \
-    && rm -rf /tmp/ps5-payload-sdk-src
-
-# ============================================================
-# PS5 SDK Homebrew directories
-# ============================================================
-
-RUN mkdir -p \
-      /opt/ps5-payload-sdk/target/user/homebrew/include \
-      /opt/ps5-payload-sdk/target/user/homebrew/lib \
-      /opt/ps5-payload-sdk/target/user/homebrew/etc \
-      /opt/ps5-payload-sdk/target/user/homebrew/share
-
-# ============================================================
-# PS5 libcurl
 #
-# IMPORTANT:
-# Use the PS5 Payload SDK toolchain.
-# Do NOT use Ubuntu's native libcurl.
+# Use official binary SDK instead of rebuilding SDK from source.
 # ============================================================
 
 RUN set -eux; \
+    mkdir -p /opt; \
     cd /tmp; \
-    curl -fsSL --retry 5 \
-      https://curl.haxx.se/download/curl-8.18.0.tar.xz \
-      -o curl.tar.xz; \
-    tar -xf curl.tar.xz; \
-    cd curl-8.18.0; \
-    \
-    export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk; \
-    export PATH="${PS5_PAYLOAD_SDK}/bin:/usr/lib/llvm-18/bin:${PATH}"; \
-    export LLVM_CONFIG=/usr/lib/llvm-18/bin/llvm-config; \
-    \
-    if [ -f src/tool_xattr.h ]; then \
-      sed -i 's/define USE_XATTR/ /g' src/tool_xattr.h || true; \
-    fi; \
-    \
-    autoreconf -fi; \
-    \
-    if [ -f "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh" ]; then \
-      . "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"; \
-    else \
-      echo "ERROR: prospero.sh not found"; \
-      find "${PS5_PAYLOAD_SDK}" -name prospero.sh -print; \
-      exit 1; \
-    fi; \
-    \
-    ./configure \
-      --prefix=/user/homebrew \
-      --host=x86_64-pc-freebsd \
-      --enable-static \
-      --disable-shared \
-      --with-openssl \
-      --disable-docs; \
-    \
-    make -j"$(nproc)"; \
-    \
-    make DESTDIR=/opt/ps5-payload-sdk/target install; \
-    \
-    echo "===== CURL INSTALL ====="; \
-    find /opt/ps5-payload-sdk/target/user/homebrew \
+    wget -q --show-progress \
+      https://github.com/ps5-payload-dev/sdk/releases/latest/download/ps5-payload-sdk.zip \
+      -O ps5-payload-sdk.zip; \
+    unzip -q ps5-payload-sdk.zip -d /opt; \
+    test -d /opt/ps5-payload-sdk; \
+    rm -f /tmp/ps5-payload-sdk.zip
+
+# ============================================================
+# SDK information
+# ============================================================
+
+RUN set -eux; \
+    echo "========================================"; \
+    echo "       PS5 PAYLOAD SDK"; \
+    echo "========================================"; \
+    echo "SDK: ${PS5_PAYLOAD_SDK}"; \
+    test -x "${PS5_PAYLOAD_SDK}/bin/prospero-cmake"; \
+    test -f "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"; \
+    echo "prospero-cmake: OK"; \
+    echo "prospero.sh: OK"; \
+    echo ""; \
+    echo "Checking SDK homebrew tree..."; \
+    find "${PS5_PAYLOAD_SDK}/target/user" \
       -maxdepth 4 \
       -type f \
-      -print; \
+      -print 2>/dev/null || true
+
+# ============================================================
+# PS5 SDK Homebrew
+# ============================================================
+
+RUN mkdir -p \
+      "${PS5_PAYLOAD_SDK}/target/user/homebrew/include" \
+      "${PS5_PAYLOAD_SDK}/target/user/homebrew/lib" \
+      "${PS5_PAYLOAD_SDK}/target/user/homebrew/etc" \
+      "${PS5_PAYLOAD_SDK}/target/user/homebrew/share"
+
+# ============================================================
+# Locate libcurl from SDK / prebuilt dependencies
+# ============================================================
+
+RUN set -eux; \
+    echo "========================================"; \
+    echo "       SEARCHING FOR PS5 LIBCURL"; \
+    echo "========================================"; \
     \
-    rm -rf /tmp/curl.tar.xz /tmp/curl-8.18.0
+    find "${PS5_PAYLOAD_SDK}" \
+      -type f \
+      \( \
+        -name "libcurl.a" \
+        -o -name "curl.h" \
+        -o -name "ca-bundle.crt" \
+        -o -name "cacert.pem" \
+      \) \
+      -print || true
+
+# ============================================================
+# If curl exists somewhere inside SDK, stage it into the
+# exact location required by onionHEN.
+# ============================================================
+
+RUN set -eux; \
+    CURL_LIB="$(find "${PS5_PAYLOAD_SDK}" -type f -name 'libcurl.a' | head -n 1 || true)"; \
+    CURL_HEADER="$(find "${PS5_PAYLOAD_SDK}" -type f -path '*/include/curl/curl.h' | head -n 1 || true)"; \
+    \
+    echo "CURL_LIB=${CURL_LIB}"; \
+    echo "CURL_HEADER=${CURL_HEADER}"; \
+    \
+    if [ -n "${CURL_LIB}" ] && [ -n "${CURL_HEADER}" ]; then \
+        CURL_INCLUDE="$(dirname "$(dirname "${CURL_HEADER}")")"; \
+        \
+        mkdir -p \
+          "${PS5_PAYLOAD_SDK}/target/user/homebrew/lib" \
+          "${PS5_PAYLOAD_SDK}/target/user/homebrew/include"; \
+        \
+        cp -f \
+          "${CURL_LIB}" \
+          "${PS5_PAYLOAD_SDK}/target/user/homebrew/lib/libcurl.a"; \
+        \
+        cp -a \
+          "${CURL_INCLUDE}/curl" \
+          "${PS5_PAYLOAD_SDK}/target/user/homebrew/include/"; \
+    fi
 
 # ============================================================
 # CA bundle
@@ -149,57 +161,59 @@ RUN set -eux; \
 
 RUN set -eux; \
     mkdir -p \
-      /opt/ps5-payload-sdk/target/user/homebrew/etc \
-      /opt/ps5-payload-sdk/target/user/homebrew/share; \
+      "${PS5_PAYLOAD_SDK}/target/user/homebrew/etc" \
+      "${PS5_PAYLOAD_SDK}/target/user/homebrew/share"; \
     \
-    curl -fsSL --retry 5 \
-      https://curl.se/ca/cacert.pem \
-      -o /opt/ps5-payload-sdk/target/user/homebrew/etc/ca-bundle.crt; \
+    if find "${PS5_PAYLOAD_SDK}" \
+        -type f \
+        \( -name "ca-bundle.crt" -o -name "cacert.pem" \) \
+        | grep -q .; then \
+        \
+        CA_FILE="$(find "${PS5_PAYLOAD_SDK}" \
+          -type f \
+          \( -name "ca-bundle.crt" -o -name "cacert.pem" \) \
+          | head -n 1)"; \
+        \
+        cp -f "${CA_FILE}" \
+          "${PS5_PAYLOAD_SDK}/target/user/homebrew/etc/ca-bundle.crt"; \
+    else \
+        curl -fsSL --retry 5 \
+          https://curl.se/ca/cacert.pem \
+          -o "${PS5_PAYLOAD_SDK}/target/user/homebrew/etc/ca-bundle.crt"; \
+    fi; \
     \
-    cp \
-      /opt/ps5-payload-sdk/target/user/homebrew/etc/ca-bundle.crt \
-      /opt/ps5-payload-sdk/target/user/homebrew/share/ca-bundle.crt; \
-    \
-    cp \
-      /opt/ps5-payload-sdk/target/user/homebrew/etc/ca-bundle.crt \
-      /opt/ps5-payload-sdk/target/user/homebrew/share/cacert.pem
+    cp -f \
+      "${PS5_PAYLOAD_SDK}/target/user/homebrew/etc/ca-bundle.crt" \
+      "${PS5_PAYLOAD_SDK}/target/user/homebrew/share/ca-bundle.crt"
 
 # ============================================================
-# Verify PS5 libcurl
+# Verify dependencies required by onionHEN
 # ============================================================
 
 RUN set -eux; \
     echo "========================================"; \
-    echo "       VERIFY PS5 CURL"; \
+    echo "       ONIONHEN CURL CHECK"; \
     echo "========================================"; \
     \
     test -f \
-      /opt/ps5-payload-sdk/target/user/homebrew/lib/libcurl.a; \
-    \
-    test -d \
-      /opt/ps5-payload-sdk/target/user/homebrew/include/curl; \
+      "${PS5_PAYLOAD_SDK}/target/user/homebrew/lib/libcurl.a"; \
     \
     test -f \
-      /opt/ps5-payload-sdk/target/user/homebrew/etc/ca-bundle.crt; \
+      "${PS5_PAYLOAD_SDK}/target/user/homebrew/include/curl/curl.h"; \
     \
     test -f \
-      /opt/ps5-payload-sdk/target/user/homebrew/share/ca-bundle.crt; \
+      "${PS5_PAYLOAD_SDK}/target/user/homebrew/etc/ca-bundle.crt"; \
     \
-    echo "libcurl.a:"; \
+    echo "libcurl.a: OK"; \
+    echo "curl.h: OK"; \
+    echo "CA bundle: OK"; \
+    \
     ls -lh \
-      /opt/ps5-payload-sdk/target/user/homebrew/lib/libcurl.a; \
+      "${PS5_PAYLOAD_SDK}/target/user/homebrew/lib/libcurl.a"; \
     \
-    echo "curl headers:"; \
-    ls \
-      /opt/ps5-payload-sdk/target/user/homebrew/include/curl; \
-    \
-    echo "CA bundle:"; \
-    ls -lh \
-      /opt/ps5-payload-sdk/target/user/homebrew/etc/ca-bundle.crt; \
-    \
-    echo "===== PS5 HOMEBREW ====="; \
-    find /opt/ps5-payload-sdk/target/user/homebrew \
-      -maxdepth 4 \
+    find \
+      "${PS5_PAYLOAD_SDK}/target/user/homebrew/include/curl" \
+      -maxdepth 1 \
       -type f \
       -print
 
@@ -260,8 +274,6 @@ export LLVM_CONFIG=/usr/lib/llvm-18/bin/llvm-config; \
 echo '========================================'; \
 echo '          onionHEN BUILD'; \
 echo '========================================'; \
-echo 'PS5 SDK:'; \
-echo \"${PS5_PAYLOAD_SDK}\"; \
 echo ''; \
 echo 'Checking libcurl...'; \
 test -f \"${PS5_PAYLOAD_SDK}/target/user/homebrew/lib/libcurl.a\"; \
