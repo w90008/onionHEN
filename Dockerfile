@@ -39,6 +39,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libssl-dev \
       librsvg2-bin \
       git \
+      libcurl4-openssl-dev \
+      zlib1g-dev \
     && ln -sf /usr/lib/llvm-18/bin/llvm-config /usr/local/bin/llvm-config \
     && rm -rf /var/lib/apt/lists/*
 
@@ -49,12 +51,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /workspace
 
 COPY . /workspace
-
-# Normalize shell scripts.
-# IMPORTANT:
-# Do NOT initialize git submodules here.
-# BearSSL points to an unavailable/unadvertised commit.
-# ============================================================
 
 RUN find /workspace -type f \
       \( -name "*.sh" -o -name "*.bash" \) \
@@ -80,7 +76,85 @@ RUN git clone --depth 1 \
     && rm -rf /tmp/ps5-payload-sdk-src
 
 # ============================================================
-# Keystone engine
+# PS5 SDK Homebrew directory
+# ============================================================
+
+RUN mkdir -p \
+      /opt/ps5-payload-sdk/target/user/homebrew \
+      /opt/ps5-payload-sdk/target/user/homebrew/include \
+      /opt/ps5-payload-sdk/target/user/homebrew/lib \
+      /opt/ps5-payload-sdk/target/user/homebrew/share
+
+# ============================================================
+# Build PS5 libcurl + CA bundle
+#
+# The onionHEN util CMake configuration requires:
+#
+#   target/user/homebrew/lib/libcurl.a
+#   target/user/homebrew/include/curl/
+#   target/user/homebrew/share/ca-bundle.crt
+#
+# ============================================================
+
+RUN set -eux; \
+    mkdir -p /tmp/curl-src; \
+    cd /tmp/curl-src; \
+    curl -fsSL --retry 3 \
+      https://curl.se/download/curl-8.16.0.tar.xz \
+      -o curl.tar.xz; \
+    tar -xf curl.tar.xz --strip-components=1; \
+    export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk; \
+    export PATH=/opt/ps5-payload-sdk/bin:/usr/lib/llvm-18/bin:${PATH}; \
+    export LLVM_CONFIG=/usr/lib/llvm-18/bin/llvm-config; \
+    ./configure \
+      --host=x86_64-sie-ps5 \
+      --disable-shared \
+      --enable-static \
+      --without-libpsl \
+      --without-zstd \
+      --without-brotli \
+      --without-libidn2 \
+      --without-nghttp2 \
+      --without-ngtcp2 \
+      --without-nghttp3 \
+      --without-libssh2 \
+      --without-librtmp \
+      --without-libz \
+      --with-openssl \
+      --prefix=/opt/ps5-payload-sdk/target/user/homebrew; \
+    make -j"$(nproc)"; \
+    make install; \
+    rm -rf /tmp/curl-src
+
+# ============================================================
+# CA bundle
+# ============================================================
+
+RUN set -eux; \
+    mkdir -p /opt/ps5-payload-sdk/target/user/homebrew/share; \
+    curl -fsSL --retry 3 \
+      https://curl.se/ca/cacert.pem \
+      -o /opt/ps5-payload-sdk/target/user/homebrew/share/ca-bundle.crt; \
+    cp \
+      /opt/ps5-payload-sdk/target/user/homebrew/share/ca-bundle.crt \
+      /opt/ps5-payload-sdk/target/user/homebrew/share/cacert.pem
+
+# ============================================================
+# Verify PS5 curl installation
+# ============================================================
+
+RUN set -eux; \
+    test -f /opt/ps5-payload-sdk/target/user/homebrew/lib/libcurl.a; \
+    test -d /opt/ps5-payload-sdk/target/user/homebrew/include/curl; \
+    test -f /opt/ps5-payload-sdk/target/user/homebrew/share/ca-bundle.crt; \
+    echo "===== PS5 HOMEBREW ====="; \
+    find /opt/ps5-payload-sdk/target/user/homebrew \
+      -maxdepth 3 \
+      -type f \
+      -print
+
+# ============================================================
+# Keystone
 # ============================================================
 
 RUN pip3 install \
@@ -118,17 +192,10 @@ RUN if getent group "${HOST_GID}" >/dev/null; then \
     && usermod --gid "${HOST_GID}" --shell /bin/bash builder \
     && chown -R builder:"${builder_group}" /workspace
 
-# ============================================================
-# Run as builder
-# ============================================================
-
 USER builder
 
 # ============================================================
-# Build
-#
-# IMPORTANT:
-# No "git submodule update --init --recursive" here.
+# Build onionHEN
 # ============================================================
 
 CMD ["/bin/bash", "-lc", "\
@@ -141,13 +208,20 @@ export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk; \
 export PATH=/usr/lib/llvm-18/bin:${PS5_PAYLOAD_SDK}/bin:${PATH}; \
 export LLVM_CONFIG=/usr/lib/llvm-18/bin/llvm-config; \
 echo '========================================'; \
-echo '        BUILDING onionHEN'; \
+echo '      onionHEN BUILD'; \
 echo '========================================'; \
-./scripts/build.sh --jobs 8; \
+echo 'PS5 SDK:'; \
+echo \"${PS5_PAYLOAD_SDK}\"; \
+echo 'Checking libcurl...'; \
+test -f \"${PS5_PAYLOAD_SDK}/target/user/homebrew/lib/libcurl.a\"; \
+echo 'Checking CA bundle...'; \
+test -f \"${PS5_PAYLOAD_SDK}/target/user/homebrew/share/ca-bundle.crt\"; \
+echo 'Dependencies OK'; \
+./scripts/build.sh --jobs 8 --release; \
 echo '========================================'; \
-echo '        BUILD FINISHED'; \
+echo '      BUILD FINISHED'; \
 echo '========================================'; \
 rm -rf /workspace/build; \
 cp -a /tmp/onionhen-build/build /workspace/build; \
-find /workspace/build -type f -print \
+find /workspace/build/bin -maxdepth 1 -type f -print \
 "]
