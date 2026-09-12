@@ -1,6 +1,8 @@
 name: Build onionHEN
 
 on:
+  workflow_dispatch:
+
   push:
     branches:
       - main
@@ -11,75 +13,128 @@ on:
       - main
       - master
 
-  workflow_dispatch:
-
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   build:
+    name: Build onionHEN
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+
+      # --------------------------------------------------
+      # 1. Download source WITHOUT submodules
+      # --------------------------------------------------
+      - name: Checkout source
         uses: actions/checkout@v4
         with:
-          submodules: recursive
           fetch-depth: 1
+          submodules: false
 
-      - name: Fix line endings
+      # --------------------------------------------------
+      # 2. Make shell scripts Linux-compatible
+      # --------------------------------------------------
+      - name: Fix shell scripts
+        shell: bash
         run: |
-          find . -type f \( -name "*.sh" -o -name "*.bash" \) -print0 \
-            | xargs -0 -r sed -i 's/\r$//'
+          set -e
 
+          find . -type f \( \
+            -name "*.sh" \
+            -o -name "*.bash" \
+          \) -print0 | while IFS= read -r -d '' file; do
+            sed -i 's/\r$//' "$file"
+          done
+
+      # --------------------------------------------------
+      # 3. Build Docker image
+      # --------------------------------------------------
       - name: Build Docker image
+        shell: bash
         run: |
+          set -e
+
           docker build \
             --build-arg HOST_UID=1000 \
             --build-arg HOST_GID=1000 \
-            -t onionhen-builder .
+            --tag onionhen-builder:latest \
+            .
 
-      - name: Run onionHEN build
+      # --------------------------------------------------
+      # 4. Run actual onionHEN build
+      # --------------------------------------------------
+      - name: Build onionHEN
+        shell: bash
         run: |
-          mkdir -p compiled_output
+          set -e
 
           docker run \
             --name onionhen-build \
-            onionhen-builder
+            onionhen-builder:latest
 
-      - name: Extract build
-        if: always()
-        run: |
-          mkdir -p compiled_output
-
-          docker cp onionhen-build:/workspace/build ./compiled_output/build \
-            || true
-
-          echo ""
-          echo "===== BUILD OUTPUT ====="
-          find ./compiled_output -type f \
-            \( -name "*.elf" -o -name "*.bin" -o -name "*.lzma" -o -name "*.map" \) \
-            -print || true
-
+      # --------------------------------------------------
+      # 5. Show container output
+      # --------------------------------------------------
       - name: Show build log
         if: always()
+        shell: bash
         run: |
           docker logs onionhen-build || true
 
+      # --------------------------------------------------
+      # 6. Extract build directory
+      # --------------------------------------------------
+      - name: Extract build files
+        if: always()
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p compiled_output
+
+          docker cp \
+            onionhen-build:/workspace/build \
+            ./compiled_output/build || true
+
+          echo ""
+          echo "===================================="
+          echo "       onionHEN BUILD OUTPUT"
+          echo "===================================="
+
+          find ./compiled_output \
+            -type f \
+            \( \
+              -name "*.elf" \
+              -o -name "*.bin" \
+              -o -name "*.lzma" \
+              -o -name "*.map" \
+            \) \
+            -print || true
+
+      # --------------------------------------------------
+      # 7. Build information
+      # --------------------------------------------------
       - name: Create build information
         if: always()
+        shell: bash
         run: |
           {
             echo "onionHEN GitHub Actions Build"
             echo "Commit: $GITHUB_SHA"
             echo "Branch: $GITHUB_REF_NAME"
-            echo "Date: $(date -u)"
+            echo "Runner: $RUNNER_OS"
+            echo "Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           } > compiled_output/build_info.txt
 
-      - name: Upload onionHEN build
+      # --------------------------------------------------
+      # 8. Upload final files
+      # --------------------------------------------------
+      - name: Upload onionHEN
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: onionHEN-build-${{ github.sha }}
+          name: onionHEN-${{ github.sha }}
           path: compiled_output/
           if-no-files-found: warn
+          retention-days: 14
