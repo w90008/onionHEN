@@ -1,61 +1,85 @@
-name: Fixed Docker Build onionHEN
+name: Build onionHEN
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches:
+      - main
+      - master
+
   pull_request:
-    branches: [ "main", "master" ]
+    branches:
+      - main
+      - master
+
   workflow_dispatch:
 
-# فرض المتغيرات البيئية عالمياً لحل مشكلة نظام جيتهاب الحديث (Node 24)
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-    # 1. سحب كود مشروعك الأساسي فقط وبشكل سريع بدون تفعيل الـ submodules المعطوبة خارجياً
-    - name: Checkout Clean Code
-      uses: actions/checkout@v4
-      with:
-        submodules: 'false'
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
 
-    # 2. تعديل ملف الـ Dockerfile تلقائياً لإصلاح سطر السحب المكسور لـ BearSSL قبل التشغيل
-    - name: Fix and Patch Dockerfile Internal Links
-      run: |
-        if [ -f Dockerfile ]; then
-          # إجبار نظام الأوامر بالداخل على تخطي سحب الـ submodule المكسور وإكمال بناء الأدوات الأخرى
-          sed -i 's/git -C \/workspace submodule update --init --recursive/git -C \/workspace submodule update --init --recursive || true/g' Dockerfile
-        fi
+      - name: Fix line endings
+        run: |
+          find . -type f \( -name "*.sh" -o -name "*.bash" \) -print0 \
+            | xargs -0 -r sed -i 's/\r$//'
 
-    # 3. بناء الحاوية وتشغيل عملية التجميع البرمجي الرسمية للمشروع بالكامل
-    - name: Build with Docker Compose
-      run: |
-        mkdir -p ./compiled_output
-        docker compose build --no-cache
-        docker compose up -d
+      - name: Build Docker image
+        run: |
+          docker build \
+            --build-arg HOST_UID=1000 \
+            --build-arg HOST_GID=1000 \
+            -t onionhen-builder .
 
-    # 4. استخراج ونسخ كافة الملفات الناتجة والـ Binaries مجتمعة من الحاوية النشطة
-    - name: Extract Build Outputs
-      run: |
-        CONTAINER_ID=$(docker compose ps -q | head -n 1)
-        echo "Extracting from Active Container: $CONTAINER_ID"
-        
-        # نسخ مساحات العمل والمخرجات بالكامل
-        docker cp $CONTAINER_ID:/workspace/. ./compiled_output/ 2>/dev/null || docker cp $CONTAINER_ID:/app/. ./compiled_output/ 2>/dev/null || true
-        
-        # تنظيف مجلد الرفع من الملفات المخفية وملفات النظام الخام لتقليص الحجم والتركيز على الإنتاج النهائي
-        rm -rf ./compiled_output/.git ./compiled_output/.github 2>/dev/null || true
-        
-        # إنشاء ملف فحص لضمان نجاح التصدير وعدم خروج المجلد فارغاً تحت أي ظرف
-        echo "OnionHEN Compilation Stream Completed Successfully" > ./compiled_output/build_info.txt
+      - name: Run onionHEN build
+        run: |
+          mkdir -p compiled_output
 
-    # 5. رفع الملفات الجاهزة للتحميل المباشر
-    - name: Upload Final Build
-      uses: actions/upload-artifact@v4
-      with:
-        name: onionHEN-Final-Package
-        path: ./compiled_output/
+          docker run \
+            --name onionhen-build \
+            onionhen-builder
+
+      - name: Extract build
+        if: always()
+        run: |
+          mkdir -p compiled_output
+
+          docker cp onionhen-build:/workspace/build ./compiled_output/build \
+            || true
+
+          echo ""
+          echo "===== BUILD OUTPUT ====="
+          find ./compiled_output -type f \
+            \( -name "*.elf" -o -name "*.bin" -o -name "*.lzma" -o -name "*.map" \) \
+            -print || true
+
+      - name: Show build log
+        if: always()
+        run: |
+          docker logs onionhen-build || true
+
+      - name: Create build information
+        if: always()
+        run: |
+          {
+            echo "onionHEN GitHub Actions Build"
+            echo "Commit: $GITHUB_SHA"
+            echo "Branch: $GITHUB_REF_NAME"
+            echo "Date: $(date -u)"
+          } > compiled_output/build_info.txt
+
+      - name: Upload onionHEN build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: onionHEN-build-${{ github.sha }}
+          path: compiled_output/
+          if-no-files-found: warn
